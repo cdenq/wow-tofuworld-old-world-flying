@@ -1,17 +1,40 @@
-#
-# Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license: https://github.com/azerothcore/azerothcore-wotlk/blob/master/LICENSE-AGPL3
-#
-
 [worldserver]
 
 ########################################
-# My module configuration
+# mod-fly-in-old-world (Tofu Worldview fork)
 ########################################
 #
-#    MyModule.Enable
-#        Description: Enable my module and print "Hello World" message at server start
-#        Default:     0 - Disabled
-#                     1 - Enabled
+#    FlyInOldWorld.Enable
+#        Description: Allow flying in Eastern Kingdoms and Kalimdor for characters that meet the rule below. 0 blocks flying there for everyone (the area data in this module's SQL marks those maps flyable, so the switch blocks rather than doing nothing). Outland and Northrend are not affected. Reloads with .reload config.
+#        Default:     1 - Enabled
+#                     0 - Disabled (no flying in Eastern Kingdoms or Kalimdor)
 #
 
-MyModule.Enable = 1
+FlyInOldWorld.Enable = 1
+
+#
+#    FlyInOldWorld.RequiredSpell
+#        Description: Spell a character must know (in its active talent spec) to fly in Eastern Kingdoms and Kalimdor. The flying mount itself still needs its normal riding skill. Reloads with .reload config.
+#        Default:     54197 - Cold Weather Flying (the same rule as Northrend)
+#                     0     - No spell needed; riding skill alone decides
+#
+
+FlyInOldWorld.RequiredSpell = 54197
+
+#
+#    FlyInOldWorld.BotsUseMasterPermission
+#        Description: A mod-playerbots bot whose master is a real player may fly in Eastern Kingdoms and Kalimdor exactly when its master may, whatever the bot knows. Bots copy their master's mount, so your bots fly with you and a friend's bots stay on the ground when that friend cannot fly. Bots without a real master (unaffiliated random bots) and selfbots use the RequiredSpell rule themselves. Reloads with .reload config.
+#        Default:     1 - Enabled
+#                     0 - Every bot uses the RequiredSpell rule itself
+#
+
+FlyInOldWorld.BotsUseMasterPermission = 1
+
+#
+#    FlyInOldWorld.Announce
+#        Description: Write the settings line to the worldserver log at startup and on .reload config.
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+FlyInOldWorld.Announce = 1

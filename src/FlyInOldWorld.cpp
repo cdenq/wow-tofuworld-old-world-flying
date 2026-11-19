@@ -1,67 +1,101 @@
 /*
- * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license: https://github.com/azerothcore/azerothcore-wotlk/blob/master/LICENSE-AGPL3
+ * mod-fly-in-old-world (Tofu Worldview fork of trackmastersteve/mod-fly-in-old-world): flying in Eastern Kingdoms and Kalimdor, gated like Northrend.
+ *
+ * The core decides whether a flying mount or flight form works in an area in SpellInfo::CheckLocation: the area must have AREA_FLAG_OUTLAND (AreaTableEntry::IsFlyable) and Player::canFlyInZone must agree. canFlyInZone first asks every PlayerScript through OnPlayerCanFlyInZone, then applies the core's own Northrend rule (Cold Weather Flying, 54197).
+ *
+ * Stock AreaTable has no AREA_FLAG_OUTLAND on Eastern Kingdoms (map 0) or Kalimdor (map 1). The module's SQL (data/sql/db-world) adds it through areatable_dbc rows on the server, and the client needs the same flag from a patched AreaTable.dbc in patch-z.mpq (tools/gen_areatable.py writes both). With the flag in place, this hook is the only gate left for those two maps:
+ *   - Enable = 0: nobody flies there (the hook blocks, since the area data alone would let anyone with flying riding skill fly).
+ *   - A real player flies there if RequiredSpell is 0 or the player knows RequiredSpell (default 54197, Cold Weather Flying).
+ *   - A mod-playerbots bot whose master is a real player flies there only if that master would be allowed (BotsUseMasterPermission = 1). A bot with no real master, a selfbot, or any bot with BotsUseMasterPermission = 0 uses the real-player rule.
+ * Outland, Northrend, and every other map are left to the core.
  */
 
-#include "ScriptMgr.h"
+#include "Config.h"
+#include "DBCStores.h"
+#include "Log.h"
 #include "Player.h"
-#include "Item.h"
+#include "ScriptMgr.h"
+#include "SharedDefines.h"
 
-enum {
-    OLD_WORLD_FLYING_SPELL = 200001,
-    VISUAL_READING_SPELL   = 7355 // Generic visual book reading aura
-};
+#include "PlayerbotAI.h"
+#include "Playerbots.h"
 
-// Player script for zone flight permissions
-class FlyInOldWorld : public PlayerScript
+namespace
+{
+    struct FlyInOldWorldConfig
+    {
+        bool enabled = true;
+        uint32 requiredSpell = 54197; // Cold Weather Flying
+        bool botsUseMasterPermission = true;
+        bool announce = true;
+    };
+
+    // Written on the world thread at startup and on ".reload config"; read by canFlyInZone on map threads. Plain values, as in the core's own config reads.
+    FlyInOldWorldConfig config;
+
+    bool IsOldWorld(uint32 mapId, uint32 zoneId)
+    {
+        uint32 const virtualMap = GetVirtualMapForMapAndZone(mapId, zoneId);
+        return virtualMap == MAP_EASTERN_KINGDOMS || virtualMap == MAP_KALIMDOR;
+    }
+
+    // The rule for a character acting for itself: no spell needed, or the spell is known in the active talent spec.
+    bool MeetsRequirement(Player* player)
+    {
+        return config.requiredSpell == 0 || player->HasSpell(config.requiredSpell);
+    }
+
+    bool MayFlyInOldWorld(Player* player)
+    {
+        if (!config.enabled)
+            return false;
+
+        if (config.botsUseMasterPermission && !IsRealPlayer(player) && !IsSelfBot(player))
+        {
+            PlayerbotAI* botAI = GET_PLAYERBOT_AI(player);
+            Player* master = botAI ? botAI->GetMaster() : nullptr;
+            // A bot follows its master's mount, so it inherits the master's permission. Only a real player counts as a master here; a bot whose master is missing, offline, or another bot uses its own rule.
+            if (master && master != player && master->IsInWorld() && IsRealPlayer(master))
+                return MeetsRequirement(master);
+        }
+
+        return MeetsRequirement(player);
+    }
+}
+
+class FlyInOldWorldPlayerScript : public PlayerScript
 {
 public:
-    FlyInOldWorld() : PlayerScript("FlyInOldWorld") { }
+    FlyInOldWorldPlayerScript() : PlayerScript("FlyInOldWorldPlayerScript", { PLAYERHOOK_ON_CAN_PLAYER_FLY_IN_ZONE }) { }
 
     bool OnPlayerCanFlyInZone(Player* player, uint32 mapId, uint32 zoneId, SpellInfo const* /*bySpell*/) override
     {
-        uint32 v_map = GetVirtualMapForMapAndZone(mapId, zoneId);
-        if (v_map == 0 || v_map == 1)
-        {
-            if (!player->HasSpell(OLD_WORLD_FLYING_SPELL))
-            {
-                return false;
-            }
-        }
-        return true;
+        if (!player || !IsOldWorld(mapId, zoneId))
+            return true; // not ours: the core's own rules decide
+
+        return MayFlyInOldWorld(player);
     }
 };
 
-// Item script to bypass spell engine requirements entirely
-class item_tome_of_old_world_flight : public ItemScript
+class FlyInOldWorldWorldScript : public WorldScript
 {
 public:
-    item_tome_of_old_world_flight() : ItemScript("item_tome_of_old_world_flight") { }
+    FlyInOldWorldWorldScript() : WorldScript("FlyInOldWorldWorldScript", { WORLDHOOK_ON_AFTER_CONFIG_LOAD }) { }
 
-    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    void OnAfterConfigLoad(bool reload) override
     {
-        if (player->HasSpell(OLD_WORLD_FLYING_SPELL))
-        {
-            player->SendSystemMessage("You already know Old World Flying.");
-            return false; 
-        }
+        config.enabled = sConfigMgr->GetOption<bool>("FlyInOldWorld.Enable", true);
+        config.requiredSpell = sConfigMgr->GetOption<uint32>("FlyInOldWorld.RequiredSpell", 54197);
+        config.botsUseMasterPermission = sConfigMgr->GetOption<bool>("FlyInOldWorld.BotsUseMasterPermission", true);
+        config.announce = sConfigMgr->GetOption<bool>("FlyInOldWorld.Announce", true);
 
-        // 1. Play the visual reading animation
-        player->CastSpell(player, VISUAL_READING_SPELL, true);
-
-        // 2. Silently add the spell directly to the database to avoid DBC string broadcast errors ("Soulstorm")
-        player->addSpell(OLD_WORLD_FLYING_SPELL, 1, true, false, false);
-        
-        // 3. Print our custom success message and destroy the Tome
-        player->SendSystemMessage("You have successfully learned Old World Flying!");
-        player->DestroyItemCount(item->GetEntry(), 1, true);
-
-        return true; 
+        if (config.announce)
+            LOG_INFO("module", "mod-fly-in-old-world: {} (enabled {}, required spell {}, bots use master permission {}).", reload ? "config reloaded" : "loaded", config.enabled ? 1 : 0, config.requiredSpell, config.botsUseMasterPermission ? 1 : 0);
     }
 };
 
-// Add all scripts
 void AddFlyInOldWorld()
 {
-    new FlyInOldWorld();
-    new item_tome_of_old_world_flight();
+    new FlyInOldWorldPlayerScript();
+    new FlyInOldWorldWorldScript();
 }
